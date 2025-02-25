@@ -1,0 +1,1 @@
+Fonctions : interface utilisateur pour le monitoring et le paramétrage du bot

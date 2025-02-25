@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard Trading Bot</title>
+  <!-- Bootstrap 5 CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      background-color: #121212;
+      color: #ffffff;
+    }
+    .navbar {
+      background-color: #1f1f1f;
+    }
+    .card {
+      background-color: #1e1e1e;
+      border: none;
+      color: #ffffff;
+    }
+    .table {
+      background-color: #1e1e1e;
+      color: #ffffff;
+    }
+    .table th, .table td {
+      vertical-align: middle;
+    }
+    .refresh-btn {
+      margin-bottom: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <!-- Navigation Bar -->
+  <nav class="navbar navbar-expand-lg navbar-dark">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="#">Trading Bot Dashboard</a>
+    </div>
+  </nav>
+  
+  <!-- Main Container -->
+  <div class="container mt-4">
+    <!-- Bouton de rafraîchissement manuel -->
+    <div class="row">
+      <div class="col-12 text-end">
+        <button id="refreshBtn" class="btn btn-outline-light refresh-btn">Rafraîchir maintenant</button>
+      </div>
+    </div>
+    
+    <!-- Performance Summary -->
+    <div class="row mb-4">
+      <div class="col-md-3">
+        <div class="card text-center p-3">
+          <h5>Solde Total</h5>
+          <p id="balance"></p>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card text-center p-3">
+          <h5>PnL Total</h5>
+          <p id="pnl_total"></p>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card text-center p-3">
+          <h5>Trades Gagnants/Perdants</h5>
+          <p id="trade_stats"></p>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card text-center p-3">
+          <h5>Taux de Réussite (%)</h5>
+          <p id="win_rate"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Graphiques de performance -->
+    <div class="row mb-4">
+      <div class="col-12">
+        <div class="card p-3">
+          <h5 class="card-title">Évolution du PnL (30 dernières heures)</h5>
+          <canvas id="pnlChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Historique des Trades -->
+    <div class="row mb-4">
+      <div class="col-12">
+        <div class="card p-3">
+          <h5 class="card-title">Historique des Trades</h5>
+          <div class="table-responsive">
+            <table class="table table-dark table-striped">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Timestamp</th>
+                  <th>Actif</th>
+                  <th>Type</th>
+                  <th>Taille</th>
+                  <th>Entrée</th>
+                  <th>Sortie</th>
+                  <th>SL/TP</th>
+                  <th>PnL (USD / %)</th>
+                  <th>Frais</th>
+                  <th>Statut</th>
+                  <th>Stratégie</th>
+                  <th>Indicateurs</th>
+                  <th>Confiance</th>
+                </tr>
+              </thead>
+              <tbody id="tradesTable">
+                <!-- Rempli dynamiquement -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gestion des Risques -->
+    <div class="row mb-4">
+      <div class="col-12">
+        <div class="card p-3">
+          <h5 class="card-title">Gestion des Risques</h5>
+          <p id="riskMetrics">Drawdown: <span id="drawdown"></span>% | Exposition: <span id="maxExposure"></span>% | Ratio R/R: <span id="riskReward"></span></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bouton d'exportation -->
+    <div class="row mb-4">
+      <div class="col-12 text-end">
+        <button id="exportBtn" class="btn btn-outline-light">Exporter les données (CSV)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bootstrap 5 JS Bundle -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <!-- Inclusion du client Socket.IO -->
+  <script src="/socket.io/socket.io.js"></script>
+  <!-- Script personnalisé pour le dashboard -->
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

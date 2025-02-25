@@ -1,0 +1,41 @@
+{
+    "binance": {
+        "production": {
+            "API_KEY": "hodtSbBNLSBrDaqAMBEzfdMoGikNynB5wh2cL3xCUVubxMyZYLCP6iRDGffuaCsS",
+            "API_SECRET": "pzbN2NalNjWTQOE0aiYTuSWGp44t0fzS7RTH3dsgKTvbmzZNoY6Lam2HAACoTgis"
+        },
+        "testnet": {
+            "API_KEY": "u6cP7KVlRmHLTC4RnGD0jkDZzgEkyK4nXVfIwlxQoM1j9HZZPUu8Vkrbk6ymfIlD",
+            "API_SECRET": "P5v5e3Zw24ACZVEnM35NuX3q98ZX29b3tfVHkyzhuEjtvITfCnZUFMKExm8gV2c"
+        }
+    },
+    "mode": "testnet",
+    "use_lstm": true,
+    "trading": {
+        "initial_capital": 200,
+        "trading_fee": 0.001,
+        "risk_management": {
+            "stop_loss": 0.02,
+            "take_profit": 0.05
+        },
+        "buy_threshold": 0.546398788362281,
+        "sell_threshold": -0.42676477084501296
+    },
+    "signal_weights": {
+        "rsi": 0.1116167224336399,
+        "macd": 0.13119890406724052,
+        "bollinger": 0.19507143064099164,
+        "ichimoku": 0.15986584841970367,
+        "adx": 0.08745401188473625,
+        "volume": 0.11011150117432088,
+        "ma_crossover": 0.1,
+        "lstm": 0.36240745617697456
+    },
+    "backtest": {
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "start_str": "180 days ago UTC",
+        "end_str": null,
+        "max_evals": 50
+    }
+}
