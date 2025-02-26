@@ -9,8 +9,6 @@ from tensorflow.keras.models import load_model
 import joblib
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-
-# Import de la configuration centrale des features
 from src.utils.config_features import LSTM_FEATURES
 
 logger = logging.getLogger(__name__)
@@ -20,24 +18,41 @@ formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+def extrapolate_dataframe(df, target_length, window=2):
+    current_length = len(df)
+    pad_rows = target_length - current_length
+    if pad_rows <= 0:
+        return df.copy()
+    last_row = df.iloc[-1]
+    if current_length >= window + 1:
+        differences = []
+        for i in range(1, window+1):
+            diff = df.iloc[-i] - df.iloc[-i-1]
+            differences.append(diff)
+        slope = sum(differences) / window
+    else:
+        slope = pd.Series(0, index=last_row.index)
+    new_rows = []
+    for i in range(pad_rows):
+        new_row = last_row + slope * (i + 1)
+        new_rows.append(new_row)
+    padding_df = pd.DataFrame(new_rows)
+    result_df = pd.concat([df, padding_df], ignore_index=True)
+    return result_df
+
 class TechnicalStrategy:
     def __init__(self):
         try:
-            # Construire le chemin absolu vers le modèle et le scaler
             model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                       "C:\\Users\\timot\\OneDrive\\Bureau\\BOT TRADING BIG 2025\\trading_bot\\src\\models",
                                       "LSTM_trading_model_final_pre-entrainement.keras")
             scaler_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                        "C:\\Users\\timot\\OneDrive\\Bureau\\BOT TRADING BIG 2025\\trading_bot\\src\\models",
                                        "scaler_pre-entrainement.pkl")
-            
-            # Vérifier si les fichiers existent
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model file not found: {model_path}")
             if not os.path.exists(scaler_path):
                 raise FileNotFoundError(f"Scaler file not found: {scaler_path}")
-            
-            # Charger le modèle et le scaler en spécifiant le custom_objects pour l'initialiseur Orthogonal
             self.lstm_model = load_model(model_path,
                 custom_objects={'Orthogonal': tf.keras.initializers.Orthogonal},
                 compile=False)
@@ -88,24 +103,21 @@ class TechnicalStrategy:
 
     def compute_adx(self, df, period=14):
         if not {'high', 'low', 'close'}.issubset(df.columns):
-            raise ValueError("Columns 'high','low','close' are required for ADX computation.")
+            raise ValueError("Les colonnes 'high','low','close' sont requises pour l'ADX.")
         high = df['high']
         low = df['low']
         close = df['close']
         prev_close = close.shift(1)
-        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        # Replace infinities to avoid heavy rolling computations
-        tr = tr.replace([np.inf, -np.inf], np.nan)
+        tr = pd.concat([high - low,
+                        abs(high - close.shift(1)),
+                        abs(low - close.shift(1))], axis=1).max(axis=1)
         up_move = high.diff()
         down_move = low.diff().abs()
         pos_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
         neg_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-        pos_dm = pos_dm.replace([np.inf, -np.inf], np.nan)
-        neg_dm = neg_dm.replace([np.inf, -np.inf], np.nan)
         tr_smooth = tr.rolling(window=period, min_periods=period).sum().replace(0, np.nan)
         pos_dm_smooth = pos_dm.rolling(window=period, min_periods=period).sum()
         neg_dm_smooth = neg_dm.rolling(window=period, min_periods=period).sum()
-        # Add a small constant to avoid zero-division
         pos_di = 100 * (pos_dm_smooth / (tr_smooth + 1e-10))
         neg_di = 100 * (neg_dm_smooth / (tr_smooth + 1e-10))
         dx = 100 * (abs(pos_di - neg_di) / (pos_di + neg_di + 1e-10)).replace([np.inf, -np.inf], np.nan)
@@ -127,15 +139,16 @@ class TechnicalStrategy:
     def predict_lstm(self, df, sequence_length=40):
         """
         Prédiction des prix futurs à partir du modèle LSTM.
-        Cette méthode utilise la configuration centrale des features.
+        Prépare les données en calculant les indicateurs supplémentaires, en comblant les NaN
+        par interpolation linéaire puis ffill/bfill, et en s'assurant que la séquence a au moins sequence_length lignes.
         """
         if self.lstm_model is None:
-            logger.error("❌ LSTM Model non chargé. Skipping prediction.")
+            logger.error("❌ LSTM Model non chargé. Skip prediction.")
             return None
 
         df = df.copy()
 
-        # Calcul des indicateurs supplémentaires pour correspondre aux features d'entraînement
+        # Calcul des indicateurs supplémentaires
         df.loc[:, "ADX"] = self.compute_adx(df)
         df.loc[:, "ATR"] = self.compute_atr(df)
         df.loc[:, "SMA_20"] = df["close"].rolling(window=20).mean()
@@ -149,20 +162,28 @@ class TechnicalStrategy:
         df.loc[:, "MACD"] = macd
         df.loc[:, "MACD_signal"] = macd_signal
 
-        # Utilisation de la configuration centrale pour sélectionner les colonnes
+        # Vérifier et loguer les colonnes disponibles
         required_cols = LSTM_FEATURES
-
-        df_required = df[required_cols].dropna().copy()
-        if df_required.empty:
-            logger.error("🚨 Pas assez de données pour la prédiction LSTM.")
-            return None
+        logger.info(f"Colonnes disponibles pour LSTM: {list(df.columns)}")
+        logger.info(f"Colonnes attendues (LSTM_FEATURES): {required_cols}")
         
-        # Instead of returning None when insufficient, we pad the data:
+        df_required = df[required_cols].copy()
+        
+        # Traitement des NaN dans df_required
+        df_required.interpolate(method='linear', limit_direction='both', inplace=True)
+        df_required.ffill(inplace=True)
+        df_required.bfill(inplace=True)
+        
+        # Vérifier la taille de la séquence après traitement
         if len(df_required) < sequence_length:
-            pad_rows = sequence_length - len(df_required)
-            padding = df_required.iloc[[-1]].copy().repeat(pad_rows)
-            df_required = pd.concat([df_required, padding], ignore_index=True)
-            logger.warning("Pas assez de données pour constituer une séquence complète. Padding appliqué.")
+            df_required = extrapolate_dataframe(df_required, sequence_length, window=2)
+            logger.warning("Séquence incomplète pour LSTM. Extrapolation appliquée pour atteindre la taille minimale.")
+
+        if df_required.isnull().any().any():
+            logger.error("Des NaN persistent dans df_required après traitement.")
+            return None
+
+        logger.info(f"Dimension du DataFrame utilisé pour LSTM après traitement: {df_required.shape}")
 
         df_scaled = self.scaler.transform(df_required)
         sequences = []
@@ -177,6 +198,6 @@ class TechnicalStrategy:
         if predictions is None or len(predictions) == 0:
             logger.error("🚨 Erreur lors de la prédiction LSTM.")
             return None
-        lstm_prediction = predictions[-1][0]  # retourne la dernière prédiction
+        lstm_prediction = predictions[-1][0]
         logger.info(f"🔮 Dernière prédiction LSTM: {lstm_prediction}")
         return lstm_prediction

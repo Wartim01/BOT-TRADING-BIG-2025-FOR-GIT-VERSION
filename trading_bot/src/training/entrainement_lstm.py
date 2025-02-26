@@ -1,16 +1,20 @@
 import os
 import sys
 import logging
-import time
 import random
 import numpy as np
-import pandas as pd
-import joblib
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, GRU, Dense, Dropout, BatchNormalization, LayerNormalization
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow import keras
+Sequential = keras.models.Sequential
+LSTM = keras.layers.LSTM
+GRU = keras.layers.GRU
+Dense = keras.layers.Dense
+Dropout = keras.layers.Dropout
+BatchNormalization = keras.layers.BatchNormalization
+LayerNormalization = keras.layers.LayerNormalization
+Adam = keras.optimizers.Adam
+EarlyStopping = keras.callbacks.EarlyStopping
+ModelCheckpoint = keras.callbacks.ModelCheckpoint
 
 # Ajouter le dossier racine du projet dans le path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -104,18 +108,38 @@ def main():
     epochs = 100  # Vous pouvez ajuster ce nombre selon vos besoins
     batch_size = 128
     logger.info("🚀 Début de l'entraînement...")
+    logger.info("🚀 Début de l'entraînement...")
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
         epochs=epochs,
         batch_size=batch_size,
         callbacks=[early_stopping, checkpoint_callback],
-        verbose=2
+        verbose=1
     )
-    
-    # Sauvegarder le modèle final
+    # Définition d'un scaler identité pour l'inversion de la normalisation
+    class IdentityScaler:
+        def inverse_transform(self, data):
+            return data
+    target_scaler = IdentityScaler()
+
+    # Évaluation sur l'ensemble de validation
+    preds = model.predict(X_val)
+    # Inversion de la normalisation
+    preds_inversed = target_scaler.inverse_transform(preds)
+    y_val_inversed = target_scaler.inverse_transform(y_val.reshape(-1,1))
+    preds = model.predict(X_val)
+    # Inversion de la normalisation
+    preds_inversed = target_scaler.inverse_transform(preds)
+    y_val_inversed = target_scaler.inverse_transform(y_val.reshape(-1,1))
+
+    mae = np.mean(np.abs(y_val_inversed - preds_inversed))
+    rmse = np.sqrt(np.mean((y_val_inversed - preds_inversed)**2))
+    logger.info(f"MAE sur validation: {mae:.5f}")
+    logger.info(f"RMSE sur validation: {rmse:.5f}")
+
+    # Sauvegarde du modèle final
     model.save(final_model_path)
     logger.info(f"✅ Modèle final sauvegardé sous '{final_model_path}'.")
-
 if __name__ == "__main__":
     main()

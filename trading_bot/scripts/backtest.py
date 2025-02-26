@@ -47,39 +47,32 @@ def load_config():
     logger.info("Configuration loaded")
     return config
 
-# --------------------------- CHARGEMENT DES HYPERPARAMÈTRES PRÉ-ENTRAÎNEMENT ---------------------------
-def load_best_hyperparameters_pretraining(config):
+# --------------------------- CHARGEMENT DES HYPERPARAMÈTRES OPTIMAUX (PRODUCTION) ---------------------------
+def load_best_hyperparameters(config):
     """
-    Charge les hyperparamètres optimisés durant la phase de pré-entrainement s'ils existent,
-    et les intègre à la configuration. Charge également les essais Hyperopt pré-entrainement.
+    Charge les hyperparamètres optimaux (production) depuis 'best_hyperparameters.pkl'
+    et met à jour la configuration, y compris les paramètres de trading et de gestion du risque.
     """
     model_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../src/models'))
-    best_hyper_path = os.path.join(model_dir, "best_hyperparameters_pre-entrainement.pkl")
-    hyperopt_trials_path = os.path.join(model_dir, "hyperopt_trials_pre-entrainement.pkl")
+    best_hyper_path = os.path.join(model_dir, "best_hyperparameters.pkl")
     
     if os.path.exists(best_hyper_path):
         try:
             best_params = joblib.load(best_hyper_path)
-            logger.info(f"Hyperparamètres pré-entrainement chargés : {best_params}")
-            # Mise à jour des paramètres de trading avec ceux optimisés
+            logger.info(f"Hyperparamètres optimaux chargés : {best_params}")
+            # Mise à jour des paramètres de trading avec les valeurs optimisées
             config["signal_weights"]["lstm"] = best_params.get("lstm_weight", config["signal_weights"].get("lstm", 0.5))
-            config["trading"]["buy_threshold"] = best_params.get("buy_threshold", config["trading"].get("buy_threshold", 0.5))
-            config["trading"]["sell_threshold"] = best_params.get("sell_threshold", config["trading"].get("sell_threshold", -0.5))
+            config["trading"]["buy_threshold"] = best_params.get("buy_threshold", config["trading"].get("buy_threshold", 0.05))
+            config["trading"]["sell_threshold"] = best_params.get("sell_threshold", config["trading"].get("sell_threshold", -0.05))
+            # Mise à jour des paramètres de gestion du risque
+            if "risk_management" not in config["trading"]:
+                config["trading"]["risk_management"] = {}
+            config["trading"]["risk_management"]["max_risk_per_trade"] = best_params.get("max_risk_per_trade", config["trading"]["risk_management"].get("max_risk_per_trade", 0.05))
+            config["trading"]["risk_management"]["stop_loss"] = best_params.get("stop_loss", config["trading"]["risk_management"].get("stop_loss", 0.02))
         except Exception as e:
-            logger.error(f"Erreur lors du chargement des hyperparamètres pré-entrainement : {e}")
+            logger.error(f"Erreur lors du chargement des hyperparamètres optimaux : {e}")
     else:
-        logger.info("Aucun fichier d'hyperparamètres pré-entrainement trouvé. Utilisation des valeurs par défaut.")
-    
-    if os.path.exists(hyperopt_trials_path):
-        try:
-            trials = joblib.load(hyperopt_trials_path)
-            logger.info("Essais Hyperopt pré-entrainement chargés avec succès.")
-            config["hyperopt_trials"] = trials  # Optionnel : stocker dans la config
-        except Exception as e:
-            logger.error(f"Erreur lors du chargement des essais Hyperopt pré-entrainement : {e}")
-    else:
-        logger.info("Aucun fichier d'essais Hyperopt pré-entrainement trouvé.")
-    
+        logger.info("Aucun fichier d'hyperparamètres optimaux trouvé. Utilisation des valeurs par défaut.")
     return config
 
 # --------------------------- CALCUL DU SCORE COMPOSITE AVEC LSTM ---------------------------
@@ -165,7 +158,30 @@ def compute_composite_score_with_lstm(strategy, df_slice, weights):
     final_score = tech_score + lstm_weight * lstm_ratio
     return final_score
 
-# --------------------------- BACKTEST PRINCIPAL ---------------------------
+# --------------------------- FONCTION D'EXTRAPOLATION ---------------------------
+def extrapolate_dataframe(df, target_length, window=2):
+    current_length = len(df)
+    pad_rows = target_length - current_length
+    if pad_rows <= 0:
+        return df.copy()
+    last_row = df.iloc[-1]
+    if current_length >= window + 1:
+        differences = []
+        for i in range(1, window+1):
+            diff = df.iloc[-i] - df.iloc[-i-1]
+            differences.append(diff)
+        slope = sum(differences) / window
+    else:
+        slope = pd.Series(0, index=last_row.index)
+    new_rows = []
+    for i in range(pad_rows):
+        new_row = last_row + slope * (i + 1)
+        new_rows.append(new_row)
+    padding_df = pd.DataFrame(new_rows)
+    result_df = pd.concat([df, padding_df], ignore_index=True)
+    return result_df
+
+# --------------------------- BACKTEST PRINCIPAL AVEC GESTION DES RISQUES ---------------------------
 def run_backtest(config):
     mode = config["mode"]
     api_key = config["binance"][mode]["API_KEY"]
@@ -175,18 +191,23 @@ def run_backtest(config):
     processor = DataProcessor()
     strategy = TechnicalStrategy()
     
+    # Chargement des paramètres de trading et gestion des risques depuis la config
     initial_capital = config["trading"].get("initial_capital", 200)
-    risk_pct = config["trading"].get("risk_percentage", 0.01)
-    risk_manager = RiskManager(account_balance=initial_capital, risk_percentage=risk_pct)
+    # Utilisation du paramètre optimisé pour le risque par trade (ex. 5% à 10% du capital)
+    max_risk = config["trading"]["risk_management"].get("max_risk_per_trade", 0.05)
+    stop_loss_pct = config["trading"]["risk_management"].get("stop_loss", 0.02)
     trading_fee = config["trading"].get("trading_fee", 0.001)
+    
+    # Création du RiskManager avec le risque maximal par trade
+    risk_manager = RiskManager(account_balance=initial_capital, risk_percentage=max_risk)
     
     symbol = config.get("backtest", {}).get("symbol", "BTCUSDT")
     interval = config.get("backtest", {}).get("interval", "1m")
     start_str = config.get("backtest", {}).get("start_str", "7 days ago UTC")
     end_str = config.get("backtest", {}).get("end_str", None)
     
-    buy_threshold = config["trading"].get("buy_threshold", 0.5)
-    sell_threshold = config["trading"].get("sell_threshold", -0.5)
+    buy_threshold = config["trading"].get("buy_threshold", 0.05)
+    sell_threshold = config["trading"].get("sell_threshold", -0.05)
     signal_weights = config.get("signal_weights", {})
     
     logger.info(f"Récupération de l'historique {symbol} depuis '{start_str}' jusqu'à '{end_str}'...")
@@ -198,33 +219,29 @@ def run_backtest(config):
     df = processor.process_data(raw_data)
     df.dropna(inplace=True)
     
-    MIN_HISTORY = 200
-    if len(df) < MIN_HISTORY:
+    logger.info("Calcul des indicateurs techniques pour le LSTM...")
+    df["rsi"] = strategy.compute_rsi(df)
+    df["macd"], _ = strategy.compute_macd(df)
+    df["bollinger_hband"], df["bollinger_lband"] = strategy.compute_bollinger_bands(df)
+    df["adx"] = strategy.compute_adx(df)
+    
+    if len(df) < 200:
         logger.error("Historique insuffisant pour le backtest.")
         return
     
     position = 0.0
     entry_price = None
-    entry_timestamp_obj = None
     trades = []
     capital = initial_capital
     max_capital = capital
-    
-    # Dans cette version, nous ne faisons pas de padding.
-    # Nous exigeons que chaque df_slice ait au moins 60 lignes pour former une séquence complète.
-    SEQ_LEN = 60
+    SEQ_LEN = 60  # Chaque séquence doit contenir au moins 60 lignes
     
     for i in range(200, len(df)):
-        # Obtenir un segment de données de taille 60
         df_slice = df.iloc[i-SEQ_LEN:i]
         if len(df_slice) < SEQ_LEN:
-            logger.warning(f"À l'index {i}, la séquence est incomplète. Passage à l'itération suivante.")
-            pad_rows = SEQ_LEN - len(df_slice)
-            # Replace .repeat(pad_rows) with pd.concat on the last row duplicated pad_rows times
-            padding_df = pd.concat([df_slice.iloc[[-1]]] * pad_rows, ignore_index=True)
-            df_slice = pd.concat([df_slice, padding_df], ignore_index=True)
-            logger.warning("Pas assez de données pour constituer une séquence complète. Padding appliqué.")
-
+            logger.warning(f"À l'index {i}, séquence incomplète. Extrapolation appliquée.")
+            df_slice = extrapolate_dataframe(df_slice, SEQ_LEN, window=2)
+    
         last_close = df["close"].iloc[i]
         
         try:
@@ -233,28 +250,26 @@ def run_backtest(config):
             logger.warning(f"Ignoré à l'index {i} : {ve}")
             continue
         
+        # Si aucune position n'est ouverte, tenter d'ouvrir un trade
         if position == 0:
             if final_score >= buy_threshold:
-                stop_loss_price = last_close * (1 - config["trading"]["risk_management"]["stop_loss"])
+                stop_loss_price = last_close * (1 - stop_loss_pct)
                 position_size = risk_manager.calculate_position_size(last_close, stop_loss_price)
                 if position_size > 0:
                     position = position_size
                     entry_price = last_close
-                    entry_timestamp_obj = datetime.now()
-                    logger.info(f"BUY @ {entry_price} | size={position_size} | entry_timestamp={entry_timestamp_obj.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logger.info(f"BUY @ {entry_price:.2f} | size={position_size:.6f} | stop_loss={stop_loss_price:.2f}")
             elif final_score <= sell_threshold:
-                stop_loss_price = last_close * (1 + config["trading"]["risk_management"]["stop_loss"])
+                stop_loss_price = last_close * (1 + stop_loss_pct)
                 position_size = risk_manager.calculate_position_size(last_close, stop_loss_price)
                 if position_size > 0:
                     position = -position_size
                     entry_price = last_close
-                    entry_timestamp_obj = datetime.now()
-                    logger.info(f"SHORT @ {entry_price} | size={position_size} | entry_timestamp={entry_timestamp_obj.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logger.info(f"SHORT @ {entry_price:.2f} | size={position_size:.6f} | stop_loss={stop_loss_price:.2f}")
         else:
+            # Fermeture des positions
             if position > 0 and final_score <= sell_threshold:
                 exit_price = last_close
-                exit_timestamp_obj = datetime.now()
-                trade_duration = int((exit_timestamp_obj - entry_timestamp_obj).total_seconds())
                 fee_buy = entry_price * abs(position) * trading_fee
                 fee_sell = exit_price * abs(position) * trading_fee
                 pnl = (exit_price - entry_price) * abs(position) - (fee_buy + fee_sell)
@@ -264,20 +279,13 @@ def run_backtest(config):
                     "entry_price": entry_price,
                     "exit_price": exit_price,
                     "size": position,
-                    "pnl": pnl,
-                    "entry_timestamp": entry_timestamp_obj.strftime("%Y-%m-%d %H:%M:%S"),
-                    "exit_timestamp": exit_timestamp_obj.strftime("%Y-%m-%d %H:%M:%S"),
-                    "trade_duration_seconds": trade_duration,
-                    "indicators": "N/A"
+                    "pnl": pnl
                 })
-                logger.info(f"SELL to close @ {exit_price} | size={position} | PnL={pnl:.2f} | capital={capital:.2f}")
+                logger.info(f"SELL to close @ {exit_price:.2f} | size={position:.6f} | PnL={pnl:.2f} | capital={capital:.2f}")
                 position = 0
                 entry_price = None
-                entry_timestamp_obj = None
             elif position < 0 and final_score >= buy_threshold:
                 exit_price = last_close
-                exit_timestamp_obj = datetime.now()
-                trade_duration = int((exit_timestamp_obj - entry_timestamp_obj).total_seconds())
                 fee_buy = exit_price * abs(position) * trading_fee
                 fee_sell = entry_price * abs(position) * trading_fee
                 pnl = (entry_price - exit_price) * abs(position) - (fee_buy + fee_sell)
@@ -287,16 +295,11 @@ def run_backtest(config):
                     "entry_price": entry_price,
                     "exit_price": exit_price,
                     "size": position,
-                    "pnl": pnl,
-                    "entry_timestamp": entry_timestamp_obj.strftime("%Y-%m-%d %H:%M:%S"),
-                    "exit_timestamp": exit_timestamp_obj.strftime("%Y-%m-%d %H:%M:%S"),
-                    "trade_duration_seconds": trade_duration,
-                    "indicators": "N/A"
+                    "pnl": pnl
                 })
-                logger.info(f"BUY to close short @ {exit_price} | size={position} | PnL={pnl:.2f} | capital={capital:.2f}")
+                logger.info(f"BUY to close short @ {exit_price:.2f} | size={position:.6f} | PnL={pnl:.2f} | capital={capital:.2f}")
                 position = 0
                 entry_price = None
-                entry_timestamp_obj = None
 
         if capital > max_capital:
             max_capital = capital
@@ -330,8 +333,8 @@ def run_backtest(config):
 def main():
     try:
         config = load_config()
-        # Intégrer les hyperparamètres pré-entrainement si disponibles
-        config = load_best_hyperparameters_pretraining(config)
+        # Charger les hyperparamètres optimaux de production depuis best_hyperparameters.pkl
+        config = load_best_hyperparameters(config)
         results = run_backtest(config)
         if results:
             logger.info("Backtest terminé. Voici un résumé des résultats :")

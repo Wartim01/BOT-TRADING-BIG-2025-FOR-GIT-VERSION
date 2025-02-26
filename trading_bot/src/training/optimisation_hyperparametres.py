@@ -1,51 +1,85 @@
-import numpy as np
-import tensorflow as tf
-import random
 import os
+import sys
+import json
 import logging
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, GRU, Dense, Dropout, BatchNormalization
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, LambdaCallback
-from hyperopt import fmin, tpe, hp, Trials
 import joblib
+import numpy as np
+from hyperopt import fmin, tpe, hp, Trials
 from tqdm import tqdm
 
 # Fixer la graine pour reproductibilité
 seed_value = 42
 os.environ['PYTHONHASHSEED'] = str(seed_value)
-random.seed(seed_value)
 np.random.seed(seed_value)
-tf.random.set_seed(seed_value)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Chargement des données prétraitées depuis les fichiers NumPy
-X_train = np.load("X_train.npy")
-y_train = np.load("y_train.npy")
-X_val = np.load("X_val.npy")
-y_val = np.load("y_val.npy")
+# Chemin vers le fichier de configuration (supposé se trouver dans trading_bot/config)
+CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../config/config.json"))
 
-# Définition de l'espace de recherche pour Hyperopt
+def load_config():
+    with open(CONFIG_PATH, "r") as f:
+        return json.load(f)
+
+def save_config(config):
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=4)
+    logger.info("Configuration mise à jour.")
+
+# IMPORTANT : Mettre à jour le chemin pour importer le module backtest.
+# Ici, nous supposons que le backtest se trouve dans trading_bot/scripts/backtest.py
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+from scripts.backtest import run_backtest
+
+# Updated objective_function signature:
+def objective_function(lstm_units, gru_units, dropout_rate, batch_size, learning_rate, epochs, 
+                         buy_threshold, sell_threshold, max_risk_per_trade, stop_loss):
+    config = load_config()
+    # Mise à jour des paramètres de trading et gestion du risque
+    config["trading"]["buy_threshold"] = buy_threshold
+    config["trading"]["sell_threshold"] = sell_threshold
+    config["trading"]["risk_management"] = config["trading"].get("risk_management", {})
+    config["trading"]["risk_management"]["max_risk_per_trade"] = max_risk_per_trade
+    config["trading"]["risk_management"]["stop_loss"] = stop_loss
+    save_config(config)
+    try:
+        results = run_backtest(config)
+    except Exception as e:
+        logger.error(f"Erreur lors du backtest: {e}")
+        return -1e6
+    if not results:
+        return -1e6
+    pnl = results.get("pnl", 0)
+    win_rate = results.get("win_rate", 0)
+    max_drawdown = results.get("max_drawdown", 1)
+    score = pnl * (win_rate / 100) - max_drawdown
+    logger.info(f"Score: {score:.2f} (PnL: {pnl:.2f}, Win Rate: {win_rate:.2f}%, Drawdown: {max_drawdown:.2f}%)")
+    return score
+
+# Espace de recherche incluant les seuils et les paramètres de gestion des risques
 space = {
     "lstm_units": hp.choice("lstm_units", [64, 128, 256, 512]),
     "gru_units": hp.choice("gru_units", [64, 128, 256]),
     "dropout_rate": hp.uniform("dropout_rate", 0.1, 0.5),
     "batch_size": hp.choice("batch_size", [32, 64, 128]),
     "learning_rate": hp.loguniform("learning_rate", np.log(0.0001), np.log(0.01)),
-    "epochs": hp.choice("epochs", [50, 100, 200])
-}
+    "epochs": hp.choice("epochs", [50, 100, 200]),
+    "buy_threshold": hp.uniform("buy_threshold", 0.02, 0.1),
+    "sell_threshold": hp.uniform("sell_threshold", -0.1, -0.02),
+    "max_risk_per_trade": hp.uniform("max_risk_per_trade", 0.005, 0.02),
+    "stop_loss": hp.uniform("stop_loss", 0.01, 0.05)
+    }
 
-# Chargement des essais Hyperopt précédents s'ils existent
-if os.path.exists("hyperopt_trials.pkl"):
-    trials = joblib.load("hyperopt_trials.pkl")
+# Correction du chemin pour sauvegarder les essais Hyperopt dans le dossier config
+trials_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../config/hyperopt_trials.pkl"))
+if os.path.exists(trials_path):
+    trials = joblib.load(trials_path)
     logger.info("Chargement des essais Hyperopt précédents.")
 else:
     trials = Trials()
-    logger.info("Nouveau run Hyperopt.")
+    logger.info("Nouvelle instance d'essais Hyperopt.")
 
-# Chargement des meilleurs hyperparamètres si disponibles
 if os.path.exists("best_hyperparameters.pkl"):
     best_params = joblib.load("best_hyperparameters.pkl")
     logger.info(f"Hyperparamètres optimaux rechargés: {best_params}")
@@ -54,7 +88,6 @@ else:
 
 best_loss = best_params['loss'] if best_params and 'loss' in best_params else float('inf')
 
-# Wrapper pour random state compatible avec Hyperopt
 class RandomStateWrapper:
     def __init__(self, seed):
         self.rs = np.random.RandomState(seed)
@@ -67,50 +100,9 @@ rstate = RandomStateWrapper(seed_value)
 
 def train_and_evaluate(params):
     logger.info(f"Test des paramètres: {params}")
-    
-    model = Sequential([
-        LSTM(params["lstm_units"], return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])),
-        Dropout(params["dropout_rate"]),
-        BatchNormalization(),
-        GRU(params["gru_units"], return_sequences=False),
-        Dropout(params["dropout_rate"]),
-        Dense(50, activation="relu"),
-        Dense(1, activation="linear")
-    ])
-    
-    optimizer = Adam(learning_rate=params["learning_rate"])
-    model.compile(optimizer=optimizer, loss="mae")
-    
-    early_stopping = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
-    checkpoint_callback = ModelCheckpoint(
-        filepath="model_checkpoint.weights.h5",
-        monitor="val_loss",
-        save_best_only=True,
-        save_weights_only=True,
-        verbose=1
-    )
-    
-    if os.path.exists("model_checkpoint.weights.h5"):
-        try:
-            model.load_weights("model_checkpoint.weights.h5")
-            logger.info("Poids chargés depuis le checkpoint.")
-        except Exception as e:
-            logger.error(f"Erreur lors du chargement du checkpoint: {e}")
-    
-    with tqdm(total=params["epochs"], desc="Entraînement du modèle", unit="epoch") as pbar:
-        history = model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=params["epochs"],
-            batch_size=params["batch_size"],
-            verbose=0,
-            callbacks=[early_stopping, checkpoint_callback,
-                       LambdaCallback(on_epoch_end=lambda epoch, logs: pbar.update(1))]
-        )
-    
-    val_loss = min(history.history["val_loss"])
-    logger.info(f"Validation Loss: {val_loss:.5f}")
-    return {"loss": val_loss, "status": "ok", "params": params}
+    score = objective_function(**params)
+    # Nous cherchons à maximiser le score, donc nous minimisons -score
+    return {"loss": -score, "status": "ok", "params": params}
 
 max_evals = 20
 current_evals = len(trials.trials)
@@ -127,16 +119,16 @@ while current_evals < max_evals:
         )
         current_evals = len(trials.trials)
         current_best_loss = trials.best_trial['result']['loss']
-        logger.info(f"Après {current_evals} essais, meilleur loss = {current_best_loss}")
+        logger.info(f"Après {current_evals} essais, meilleur score = {-current_best_loss}")
         if current_best_loss < best_loss:
             best_loss = current_best_loss
             best_params = trials.best_trial['result']['params']
-            joblib.dump(trials, "hyperopt_trials.pkl")
+            joblib.dump(trials, trials_path)
             joblib.dump({**best_params, "loss": best_loss}, "best_hyperparameters.pkl")
-            logger.info(f"Nouveau meilleur modèle trouvé: {best_params} avec loss = {best_loss}")
+            logger.info(f"Nouveaux hyperparamètres optimaux: {best_params} avec score = {-best_loss}")
     except KeyboardInterrupt:
         logger.warning("Interruption détectée. Sauvegarde des essais actuels...")
-        joblib.dump(trials, "hyperopt_trials.pkl")
+        joblib.dump(trials, trials_path)
         if best_params is not None:
             joblib.dump({**best_params, "loss": best_loss}, "best_hyperparameters.pkl")
         break

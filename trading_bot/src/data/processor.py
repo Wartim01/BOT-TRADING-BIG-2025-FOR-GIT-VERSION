@@ -7,7 +7,6 @@ from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, MaxPooling1D, LSTM, Dropout, Dense, InputLayer
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from src.strategies.quantitative import ComplexPredictiveModel
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -37,7 +36,15 @@ class DataProcessor:
         return True
 
     def process_data(self, raw_data):
-        # Création du DataFrame avec les colonnes attendues
+        """
+        Transforme les données brutes en DataFrame :
+          - Création du DataFrame avec les colonnes attendues
+          - Conversion des colonnes numériques en float
+          - Conversion des timestamps
+          - Traitement des NaN par interpolation linéaire, ffill et bfill
+          - Suppression des rares lignes restantes avec des NaN
+          - Affichage de la forme finale et des statistiques NaN
+        """
         df = pd.DataFrame(raw_data, columns=REQUIRED_COLUMNS)
         self.validate_columns(df)
     
@@ -49,33 +56,37 @@ class DataProcessor:
         except Exception as e:
             logger.error(f"Erreur lors de la conversion des colonnes numériques : {e}")
             raise
-    
+
         try:
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
             df["close_time"] = pd.to_datetime(df["close_time"], unit="ms")
         except Exception as e:
             logger.error(f"Erreur lors de la conversion des timestamps : {e}")
             raise
-    
-        # Vérification du taux de valeurs manquantes
-        missing_ratio = df.isnull().mean().max()
-        threshold = 0.1  # par exemple, 10%
-        if missing_ratio > threshold:
-            logger.warning(f"Le taux maximum de valeurs manquantes est de {missing_ratio:.2%}, ce qui dépasse le seuil de {threshold:.0%}.")
-            # Vous pouvez choisir de lever une exception ici si c'est critique
-            # raise ValueError("Taux de valeurs manquantes trop élevé.")
-    
-        # Remplissage des valeurs manquantes pour conserver la continuité
+
+        # Statistiques initiales des NaN
+        logger.info("Statistiques NaN initiales:")
+        logger.info(df.isnull().sum())
+
+        # Traitement des NaN : interpolation linéaire, puis ffill et bfill
+        df.interpolate(method='linear', limit_direction='both', inplace=True)
         df.ffill(inplace=True)
         df.bfill(inplace=True)
-
     
+        # Vérifier et supprimer les éventuelles lignes restantes avec des NaN
         if df.isnull().any().any():
-            logger.warning("Certaines valeurs manquantes persistent après le remplissage. Suppression des lignes restantes.")
+            before = df.shape[0]
             df.dropna(inplace=True)
+            after = df.shape[0]
+            logger.warning(f"Des NaN persistaient et ont été supprimés. Lignes supprimées: {before - after}")
+
+        # Afficher la forme finale et les statistiques NaN finales
+        logger.info(f"DataFrame final: {df.shape}")
+        logger.info("Statistiques NaN finales:")
+        logger.info(df.isnull().sum())
     
-        logger.info("Prétraitement des données terminé avec succès.")
         return df
+
 
 
 class QuantitativeStrategy:
